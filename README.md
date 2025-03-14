@@ -22,7 +22,7 @@ By default, MikroProxy looks for `/etc/mikroproxy.conf`. You can override this b
 
 A typical `/etc/mikroproxy.conf` might contain:
 
-``
+```ini
 # proxy_mode can be "socks" or "http"
 proxy_mode=socks
 
@@ -38,42 +38,42 @@ allowed_ip=172.18.0.0/16
 
 # (Optional) Enable TCP keepalive by setting "on" or "1"
 tcpkeepalive=on
-``
+```
 
 ### Key Fields
 
-- **`proxy_mode`**: `"socks"` or `"http"`.  
-- **`port`**: The listening port (e.g. `3128`).  
-- **`log_file`**: Where logs should be written.  
-- **`allowed_ip`**: Repeated lines for each CIDR block allowed.  
+- **`proxy_mode`**: `"socks"` or `"http"`.
+- **`port`**: The listening port (e.g. `3128`).
+- **`log_file`**: Where logs should be written.
+- **`allowed_ip`**: Repeated lines for each CIDR block allowed.
 - **`tcpkeepalive`**: If set to `"on"` or `"1"`, keepalive is enabled; otherwise disabled.
 
 ## Usage
 
 If you place a config at `/etc/mikroproxy.conf`, just run:
 
-'''bash
-sudo ./mikroproxy
 ```bash
+sudo ./mikroproxy
+```
 
 Or specify a custom config path:
 
-'bash
-sudo ./mikroproxy --config=/path/to/config.conf
 ```bash
+sudo ./mikroproxy --config=/path/to/config.conf
+```
 
 ## Testing
 
 1. **HTTP Mode**  
    ```bash
    curl -x http://127.0.0.1:3128 http://example.com -v
-   ```bash  
+   ```  
    Expects to see the request forwarded to `example.com`.
 
 2. **SOCKS5 Mode**  
    ```bash
    curl --socks5 127.0.0.1:3128 http://example.com -v
-   ```bash  
+   ```  
    Uses a SOCKS tunnel to request `example.com`.
 
 Check logs at the path configured in `log_file` (defaults to `/var/log/mikroproxy.log`) for connection info.
