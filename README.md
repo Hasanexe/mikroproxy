@@ -22,7 +22,7 @@ By default, MikroProxy looks for `/etc/mikroproxy.conf`. You can override this b
 
 A typical `/etc/mikroproxy.conf` might contain:
 
-```ini
+``ini
 # proxy_mode can be "socks" or "http"
 proxy_mode=socks
 
@@ -38,7 +38,7 @@ allowed_ip=172.18.0.0/16
 
 # (Optional) Enable TCP keepalive by setting "on" or "1"
 tcpkeepalive=on
-```ini
+``ini
 
 ### Key Fields
 
