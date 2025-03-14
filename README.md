@@ -22,7 +22,7 @@ By default, MikroProxy looks for `/etc/mikroproxy.conf`. You can override this b
 
 A typical `/etc/mikroproxy.conf` might contain:
 
-'''ini
+```ini
 # proxy_mode can be "socks" or "http"
 proxy_mode=socks
 
@@ -38,7 +38,7 @@ allowed_ip=172.18.0.0/16
 
 # (Optional) Enable TCP keepalive by setting "on" or "1"
 tcpkeepalive=on
-'''ini
+```ini
 
 ### Key Fields
 
@@ -54,26 +54,26 @@ If you place a config at `/etc/mikroproxy.conf`, just run:
 
 '''bash
 sudo ./mikroproxy
-'bash
+```bash
 
 Or specify a custom config path:
 
 'bash
 sudo ./mikroproxy --config=/path/to/config.conf
-'''bash
+```bash
 
 ## Testing
 
 1. **HTTP Mode**  
-   '''bash
+   ```bash
    curl -x http://127.0.0.1:3128 http://example.com -v
-   '''bash  
+   ```bash  
    Expects to see the request forwarded to `example.com`.
 
 2. **SOCKS5 Mode**  
-   '''bash
+   ```bash
    curl --socks5 127.0.0.1:3128 http://example.com -v
-   '''bash  
+   ```bash  
    Uses a SOCKS tunnel to request `example.com`.
 
 Check logs at the path configured in `log_file` (defaults to `/var/log/mikroproxy.log`) for connection info.
