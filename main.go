@@ -25,7 +25,7 @@ type Config struct {
         isDebug    bool
         isLogOff   bool
         LogFile    string
-    AllowedIPs []string
+        AllowedIPs []string
         TCPKeepAlive bool
 }
 
