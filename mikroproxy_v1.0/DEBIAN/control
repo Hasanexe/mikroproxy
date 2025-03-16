@@ -1,6 +1,0 @@
-Package: mikroproxy
-Version: 1.0
-Section: net
-Architecture: amd64
-Maintainer: Hasan BAGCI hasan.bagci@mikrogrup.com
-Description: Mikroproxy, A lightweight high performance HTTP/HTTPS and SOCKS5 proxy

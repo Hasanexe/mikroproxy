@@ -1,7 +1,0 @@
-#!/bin/bash
-set -e
-
-# Stop service if running
-systemctl stop mikroproxy || true
-
-exit 0
