@@ -1,0 +1,12 @@
+[Unit]
+Description=Mikroproxy - Lightweight high performance HTTP/HTTPS and SOCKS5 proxy Service
+After=network.target
+
+[Service]
+User=mikro
+Group=mikro
+ExecStart=/usr/local/bin/mikroproxy
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+#!/bin/bash
+set -e
+
+# Only create 'mikro' user if it doesn't already exist
+if ! id -u mikro >/dev/null 2>&1; then
+    useradd -r -s /bin/false mikro
+fi
+
+# Ensure a logfile exists (if you want a specific file path)
+if [ ! -f /var/log/mikroproxy.log ]; then
+    touch /var/log/mikroproxy.log
+fi
+
+# Set ownership and permissions
+chown mikro:mikro /etc/mikroproxy.conf /var/log/mikroproxy.log
+chmod 640 /etc/mikroproxy.conf
+chmod 640 /var/log/mikroproxy.log
+
+# Reload and enable systemd service
+systemctl daemon-reload
+systemctl enable mikroproxy
+
+# Start service automatically on install
+systemctl start mikroproxy || true
+
+exit 0
