@@ -11,7 +11,7 @@ MikroProxy is a lightweight SOCKS5/HTTP forward proxy written in Go. It aims for
 
 ## Installation
 
-You can **download** a prebuilt binary or `.deb` package from the [Releases page](https://github.com/yourusername/mikroproxy/releases).
+You can **download** a prebuilt binary or `.deb` package from the [Releases page](https://github.com/hasanexe/mikroproxy/releases).
 
 - **Prebuilt Binary**: Place it anywhere (e.g. `/usr/local/bin`) and run it.
 - **.deb Package**: Installs the binary, creates a `mikroproxy` user/service, and places default config/log in standard locations. Once installed, start or enable via `systemctl`.
