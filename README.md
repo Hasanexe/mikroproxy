@@ -33,7 +33,7 @@ port=3128
 log_file=/var/log/mikroproxy.log
 
 # Configuring log level by setting  debug, off or basic
-log_level=none
+log_level=basic
 
 # IP allowlist in CIDR notation (repeat as needed)
 allowed_ip=10.14.0.0/16
