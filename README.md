@@ -32,6 +32,9 @@ port=3128
 # Path to log file
 log_file=/var/log/mikroproxy.log
 
+# Configuring log level by setting  debug, off or basic
+log_level=none
+
 # IP allowlist in CIDR notation (repeat as needed)
 allowed_ip=10.14.0.0/16
 allowed_ip=172.18.0.0/16
