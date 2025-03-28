@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -20,19 +22,25 @@ import (
 
 // Config
 type Config struct {
-	Port         int
-	isSocks      bool
-	isDebug      bool
-	isLogOff     bool
-	LogFile      string
-	AllowedIPs   []string
-	TCPKeepAlive bool
+	Port              int
+	isSocks           bool
+	isDebug           bool
+	isLogOff          bool
+	LogFile           string
+	AllowedIPs        []string
+	IdleTimeout       time.Duration
+	BufferSize        int
+	LogChanBufferSize int
 }
 
 // Logging
 var (
 	cfg     *Config
 	logChan chan string
+)
+
+var (
+	bufPool sync.Pool // Declaration only (no initialization)
 )
 
 // -----------------------------------------------------
@@ -58,7 +66,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer lf.Close()
-	logChan = make(chan string, 1000) // Buffer for 1k log entries
+	logChan = make(chan string, cfg.LogChanBufferSize)
 	go func() {
 		for msg := range logChan {
 			timestamp := time.Now().Format("02.01.2006 15:04:05")
@@ -66,7 +74,10 @@ func main() {
 		}
 	}()
 
-	// 4. Parse allowed CIDRs
+	// 4. Initialize buffer pool
+	initBufferPool()
+
+	// 5. Parse allowed CIDRs
 	var networks []*net.IPNet
 	for _, cidrStr := range cfg.AllowedIPs {
 		ip, ipNet, e := net.ParseCIDR(cidrStr)
@@ -82,8 +93,21 @@ func main() {
 		networks = append(networks, ipNet)
 	}
 
+	// 6. ListenConfig global keep-alive
+	lc := &net.ListenConfig{
+		KeepAlive: 15 * time.Second, // Global keep-alive for ALL connections
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				// Linux-specific optimizations
+				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL, 10) // probes interval
+				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPCNT, 4)    // attempts
+			})
+		},
+	}
+
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.Port)
-	ln, err := net.Listen("tcp", addr)
+	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		logChan <- fmt.Sprintf("Failed to listen on %s: %v", addr, err)
 		os.Exit(1)
@@ -96,7 +120,7 @@ func main() {
 	}
 	logChan <- fmt.Sprintf("%s: listening on %s", modeStr, addr)
 
-	// 5. Accept loop
+	// 7. Accept loop
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -107,12 +131,6 @@ func main() {
 				logChan <- fmt.Sprintf("%s: Accept error: %v", modeStr, err)
 			}
 			continue
-		}
-		if cfg.TCPKeepAlive {
-			if tcpConn, ok := conn.(*net.TCPConn); ok {
-				tcpConn.SetKeepAlive(true)
-				tcpConn.SetKeepAlivePeriod(30 * time.Second)
-			}
 		}
 
 		go func(c net.Conn) {
@@ -162,6 +180,10 @@ func handleHTTPDebug(client net.Conn) {
 	defer client.Close()
 	logChan <- fmt.Sprintf("%s: New connection", "HTTP")
 
+	// Set idle timeout
+	client.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer client.SetDeadline(time.Time{})
+
 	reader := bufio.NewReader(client)
 
 	line, err := reader.ReadString('\n')
@@ -197,21 +219,15 @@ func handleHTTPDebug(client net.Conn) {
 	}
 
 	remote, err := net.Dial("tcp", hostPort)
-	if cfg.TCPKeepAlive {
-		if tcpConn, ok := remote.(*net.TCPConn); ok {
-			tcpConn.SetKeepAlive(true)
-			tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		}
-	}
+
 	if err != nil {
 		logChan <- fmt.Sprintf("HTTP: dial fail %s => %v", hostPort, err)
 		io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
 	defer remote.Close()
-
-	// clear read deadline after handshake
-	client.SetReadDeadline(time.Time{})
+	remote.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer remote.SetDeadline(time.Time{})
 
 	// If we want to rewrite only the first line to remove the absolute URL
 	// In some cases, servers require that. If you want 100% pass-thru, send the original line.
@@ -221,14 +237,28 @@ func handleHTTPDebug(client net.Conn) {
 	}
 	remote.Write([]byte(firstLine + "\r\n"))
 
-	// Copy the rest of the request from client to remote
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Client -> Remote
 	go func() {
+		defer wg.Done()
 		copyWithPool(remote, reader)
-		remote.Close()
+		if tcpConn, ok := remote.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
 	}()
 
-	// Copy response back to client
-	copyWithPool(client, remote)
+	// Remote -> Client
+	go func() {
+		defer wg.Done()
+		copyWithPool(client, remote)
+		if tcpConn, ok := client.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
 
 	logChan <- fmt.Sprintf("HTTP: forward done for %s", client.RemoteAddr())
 }
@@ -251,29 +281,43 @@ func handleHTTPConnectDebug(client net.Conn, reader *bufio.Reader, hostPort, htt
 	}
 
 	remote, err := net.Dial("tcp", hostPort)
-	if cfg.TCPKeepAlive {
-		if tcpConn, ok := remote.(*net.TCPConn); ok {
-			tcpConn.SetKeepAlive(true)
-			tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		}
-	}
+
 	if err != nil {
 		logChan <- fmt.Sprintf("HTTP: Failed to connect to %s for %s: %v", hostPort, client.RemoteAddr(), err)
 		io.WriteString(client, httpVersion+" 502 Bad Gateway\r\n\r\n")
 		return
 	}
-	defer remote.Close()
-
 	// Send 200 response
 	io.WriteString(client, httpVersion+" 200 Connection Established\r\n\r\n")
 
-	client.SetReadDeadline(time.Time{})
-
 	logChan <- fmt.Sprintf("HTTP: tunnel established %s <-> %s", client.RemoteAddr(), hostPort)
 
-	// Relay data
-	go copyWithPool(remote, reader)
-	copyWithPool(client, remote)
+	defer remote.Close()
+	remote.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer remote.SetDeadline(time.Time{})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Client -> Remote
+	go func() {
+		defer wg.Done()
+		copyWithPool(remote, reader)
+		if tcpConn, ok := remote.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	// Remote -> Client
+	go func() {
+		defer wg.Done()
+		copyWithPool(client, remote)
+		if tcpConn, ok := client.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
 
 	logChan <- fmt.Sprintf("HTTP: tunnel closed %s <-> %s", client.RemoteAddr(), hostPort)
 }
@@ -282,6 +326,11 @@ func handleHTTPConnectDebug(client net.Conn, reader *bufio.Reader, hostPort, htt
 
 func handleHTTP(client net.Conn) {
 	defer client.Close()
+
+	// Set idle timeout
+	client.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer client.SetDeadline(time.Time{})
+
 	reader := bufio.NewReader(client)
 
 	line, err := reader.ReadString('\n')
@@ -312,20 +361,14 @@ func handleHTTP(client net.Conn) {
 	}
 
 	remote, err := net.Dial("tcp", hostPort)
-	if cfg.TCPKeepAlive {
-		if tcpConn, ok := remote.(*net.TCPConn); ok {
-			tcpConn.SetKeepAlive(true)
-			tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		}
-	}
+
 	if err != nil {
 		io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
 	defer remote.Close()
-
-	// clear read deadline after handshake
-	client.SetReadDeadline(time.Time{})
+	remote.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer remote.SetDeadline(time.Time{})
 
 	// If we want to rewrite only the first line to remove the absolute URL
 	// In some cases, servers require that. If you want 100% pass-thru, send the original line.
@@ -335,14 +378,28 @@ func handleHTTP(client net.Conn) {
 	}
 	remote.Write([]byte(firstLine + "\r\n"))
 
-	// Copy the rest of the request from client to remote
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Client -> Remote
 	go func() {
+		defer wg.Done()
 		copyWithPool(remote, reader)
-		remote.Close()
+		if tcpConn, ok := remote.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
 	}()
 
-	// Copy response back to client
-	copyWithPool(client, remote)
+	// Remote -> Client
+	go func() {
+		defer wg.Done()
+		copyWithPool(client, remote)
+		if tcpConn, ok := client.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
 
 	if !cfg.isLogOff {
 		logChan <- fmt.Sprintf("HTTP: forward done for %s", client.RemoteAddr())
@@ -364,29 +421,44 @@ func handleHTTPConnect(client net.Conn, reader *bufio.Reader, hostPort, httpVers
 	}
 
 	remote, err := net.Dial("tcp", hostPort)
-	if cfg.TCPKeepAlive {
-		if tcpConn, ok := remote.(*net.TCPConn); ok {
-			tcpConn.SetKeepAlive(true)
-			tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		}
-	}
+
 	if err != nil {
 		io.WriteString(client, httpVersion+" 502 Bad Gateway\r\n\r\n")
 		return
 	}
-	defer remote.Close()
-
 	// Send 200 response
 	io.WriteString(client, httpVersion+" 200 Connection Established\r\n\r\n")
 
-	client.SetReadDeadline(time.Time{})
 	if !cfg.isLogOff {
 		logChan <- fmt.Sprintf("HTTP: tunnel established %s <-> %s", client.RemoteAddr(), hostPort)
 	}
 
-	// Relay data
-	go copyWithPool(remote, reader)
-	copyWithPool(client, remote)
+	defer remote.Close()
+	remote.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer remote.SetDeadline(time.Time{})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Client -> Remote
+	go func() {
+		defer wg.Done()
+		copyWithPool(remote, reader)
+		if tcpConn, ok := remote.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	// Remote -> Client
+	go func() {
+		defer wg.Done()
+		copyWithPool(client, remote)
+		if tcpConn, ok := client.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
 }
 
 func parseHostPortFromAbsoluteURI(method, requestURI, httpVersion string) (hostPort, newFirstLine string, err error) {
@@ -423,6 +495,10 @@ func handleSocksDebug(client net.Conn) {
 	logChan <- fmt.Sprintf("%s: New connection", "SOCKS")
 
 	defer client.Close()
+
+	// Set idle timeout
+	client.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer client.SetDeadline(time.Time{})
 
 	remoteAddr := client.RemoteAddr()
 	logChan <- fmt.Sprintf("SOCKS: Starting handshake with %s", remoteAddr)
@@ -542,8 +618,6 @@ func handleSocksDebug(client net.Conn) {
 		client.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	defer remote.Close()
-
 	// success
 	_, err = client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 	if err != nil {
@@ -552,10 +626,32 @@ func handleSocksDebug(client net.Conn) {
 	}
 	logChan <- fmt.Sprintf("SOCKS: tunnel established %s <-> %s:%d", remoteAddr, dstStr, dstPort)
 
-	client.SetReadDeadline(time.Time{})
+	defer remote.Close()
+	remote.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer remote.SetDeadline(time.Time{})
 
-	go copyWithPool(remote, client)
-	copyWithPool(client, remote)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Client -> Remote
+	go func() {
+		defer wg.Done()
+		copyWithPool(remote, client)
+		if tcpConn, ok := remote.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	// Remote -> Client
+	go func() {
+		defer wg.Done()
+		copyWithPool(client, remote)
+		if tcpConn, ok := client.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
 
 	logChan <- fmt.Sprintf("SOCKS: tunnel closed %s <-> %s:%d", remoteAddr, dstStr, dstPort)
 }
@@ -564,6 +660,10 @@ func handleSocksDebug(client net.Conn) {
 
 func handleSocks(client net.Conn) {
 	defer client.Close()
+
+	// Set idle timeout
+	client.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer client.SetDeadline(time.Time{})
 
 	remoteAddr := client.RemoteAddr()
 
@@ -680,8 +780,6 @@ func handleSocks(client net.Conn) {
 		client.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	defer remote.Close()
-
 	// success
 	_, err = client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 	if err != nil {
@@ -691,10 +789,32 @@ func handleSocks(client net.Conn) {
 		logChan <- fmt.Sprintf("SOCKS: tunnel established %s <-> %s:%d", remoteAddr, dstStr, dstPort)
 	}
 
-	client.SetReadDeadline(time.Time{})
+	defer remote.Close()
+	remote.SetDeadline(time.Now().Add(cfg.IdleTimeout))
+	defer remote.SetDeadline(time.Time{})
 
-	go copyWithPool(remote, client)
-	copyWithPool(client, remote)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Client -> Remote
+	go func() {
+		defer wg.Done()
+		copyWithPool(remote, client)
+		if tcpConn, ok := remote.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	// Remote -> Client
+	go func() {
+		defer wg.Done()
+		copyWithPool(client, remote)
+		if tcpConn, ok := client.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
 }
 
 // -----------------------------------------------------
@@ -718,18 +838,22 @@ func isAllowed(ip net.IP, networks []*net.IPNet) bool {
 // Buffer Pooling
 // -----------------------------------------------------
 
-var (
+func initBufferPool() {
 	bufPool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, 32*1024) // 32KB buffer
+			return make([]byte, cfg.BufferSize)
 		},
 	}
-)
+}
 
 func copyWithPool(dst io.Writer, src io.Reader) {
-	buf := bufPool.Get().([]byte)
-	defer bufPool.Put(buf)
-	io.CopyBuffer(dst, src, buf)
+	buf, ok := bufPool.Get().([]byte)
+	if !ok {
+		buf = make([]byte, cfg.BufferSize) // Fallback to direct buffer set instead of sync.pool
+	}
+	defer bufPool.Put(buf) // Return to pool when done
+
+	_, _ = io.CopyBuffer(dst, src, buf)
 }
 
 // -----------------------------------------------------
@@ -745,13 +869,15 @@ func loadConfig(path string) (*Config, error) {
 
 	// Default config with mode=socks, port=3128
 	cfg := &Config{
-		isSocks:      false,                     //proxy_mode   = http
-		isDebug:      false,                     //log_level    = debug
-		isLogOff:     false,                     //log_level    = off || none
-		Port:         3128,                      //port             = 3128
-		AllowedIPs:   []string{},                //allowed_ip   = 0.0.0.0/0 (cidr)
-		TCPKeepAlive: false,                     //tcpkeepalive = 1 || on
-		LogFile:      "/var/log/mikroproxy.log", //log_file
+		isSocks:           false,                     //proxy_mode   = http
+		isDebug:           false,                     //log_level    = debug
+		isLogOff:          false,                     //log_level    = off || none
+		Port:              3128,                      //port             = 3128
+		AllowedIPs:        []string{},                //allowed_ip   = 0.0.0.0/0 (cidr)
+		LogFile:           "/var/log/mikroproxy.log", //log_file
+		IdleTimeout:       30 * time.Second,          //idle_timeout
+		BufferSize:        32 * 1024,                 //buffer_size
+		LogChanBufferSize: 1000,                      //log_buffer_size
 	}
 
 	var content strings.Builder
@@ -799,8 +925,33 @@ func loadConfig(path string) (*Config, error) {
 			cfg.isLogOff = logLevel == "off" || logLevel == "none"
 		case "allowed_ip":
 			cfg.AllowedIPs = append(cfg.AllowedIPs, val)
-		case "tcpkeepalive":
-			cfg.TCPKeepAlive = val == "1" || strings.ToLower(val) == "on"
+		case "idle_timeout":
+			dur, err := time.ParseDuration(val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid idle_timeout: %v", err)
+			}
+			if dur <= 0 {
+				return nil, fmt.Errorf("idle_timeout must be > 0")
+			}
+			cfg.IdleTimeout = dur
+		case "buffer_size":
+			var size int
+			if _, err := fmt.Sscanf(val, "%d", &size); err != nil {
+				return nil, fmt.Errorf("invalid buffer_size: %v", err)
+			}
+			if size <= 0 {
+				return nil, fmt.Errorf("buffer_size must be > 0")
+			}
+			cfg.BufferSize = size
+		case "log_buffer_size":
+			var size int
+			if _, err := fmt.Sscanf(val, "%d", &size); err != nil {
+				return nil, fmt.Errorf("invalid log_buffer_size: %v", err)
+			}
+			if size <= 0 {
+				return nil, fmt.Errorf("log_buffer_size must be > 0")
+			}
+			cfg.LogChanBufferSize = size
 		}
 	}
 	return cfg, nil
