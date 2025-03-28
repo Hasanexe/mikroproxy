@@ -1,86 +1,77 @@
 # MikroProxy
 
-MikroProxy is a lightweight SOCKS5/HTTP forward proxy written in Go. It aims for minimal overhead, no caching or traffic modification, no filtering, and no authentication.
+MikroProxy is a lightweight SOCKS5/HTTP forward proxy written in Go. It aims for minimal overhead, no caching, no traffic modification, no filtering, no authentication.
 
 ## Features
 
-- **SOCKS5** or **HTTP** modes, selected via `proxy_mode`
-- Simple IP-based allowlisting via `allowed_ip` (CIDR)
-- Optional TCP keepalive via `tcpkeepalive`
-- Minimal logging – no advanced traffic inspection
+- **SOCKS5** or **HTTP** modes (`proxy_mode`).
+- IP-based allowlisting via `allowed_ip` (CIDR, IPv4 only).
+- Minimal logging – no traffic inspection.
 
 ## Installation
 
-You can **download** a prebuilt binary or `.deb` package from the [Releases page](https://github.com/hasanexe/mikroproxy/releases).
+Download the latest `.deb` package from [Releases](https://github.com/hasanexe/mikroproxy/releases).
 
-- **Prebuilt Binary**: Place it anywhere (e.g. `/usr/local/bin`) and run it.
-- **.deb Package**: Installs the binary, creates a `mikroproxy` user/service, and places default config/log in standard locations. Once installed, start or enable via `systemctl`.
+Install using:
+
+```bash
+sudo dpkg -i mikroproxy_<version>.deb
+```
 
 ## Configuration
 
-By default, MikroProxy looks for `/etc/mikroproxy.conf`. You can override this by passing `--config=/path/to/config.conf`.
-
-A typical `/etc/mikroproxy.conf` might contain:
+By default, MikroProxy reads `/etc/mikroproxy.conf`, or you can pass `--config=/path/to/mikroproxy.conf`. Example:
 
 ```ini
-# proxy_mode can be "socks" or "http"
-proxy_mode=socks
+proxy_mode = http
+port = 3128
+log_file = /var/log/mikroproxy.log
+log_level = debug
+allowed_ip = 192.168.1.0/24
+allowed_ip = 10.0.0.0/8
 
-# Listening port (default 3128)
-port=3128
-
-# Path to log file
-log_file=/var/log/mikroproxy.log
-
-# Configuring log level by setting  debug, off or basic
-log_level=basic
-
-# IP allowlist in CIDR notation (repeat as needed)
-allowed_ip=10.14.0.0/16
-allowed_ip=172.18.0.0/16
-
-# (Optional) Enable TCP keepalive by setting "on" or "1"
-tcpkeepalive=on
+idle_timeout = 30s
+buffer_size = 65536
+log_buffer_size = 1000
 ```
 
-### Key Fields
+**Key fields**:
 
-- **`proxy_mode`**: `"socks"` or `"http"`.
-- **`port`**: The listening port (e.g. `3128`).
-- **`log_file`**: Where logs should be written.
-- **`allowed_ip`**: Repeated lines for each CIDR block allowed.
-- **`tcpkeepalive`**: If set to `"on"` or `"1"`, keepalive is enabled; otherwise disabled.
+- `proxy_mode`: `http` or `socks`
+- `port`: Listening port (default 3128)
+- `log_file`: Path for logs
+- `log_level`: `debug`, `basic` or `off`
+- `allowed_ip`: One per line, CIDR format (IPv4 only)
+- `idle_timeout`: Connection idle timeout (e.g., `30s`)
+- `buffer_size`: Internal buffer size for copy operations
+- `log_buffer_size`: Log channel buffer size (number of queued messages)
 
 ## Usage
 
-If you place a config at `/etc/mikroproxy.conf`, just run:
+MikroProxy runs automatically as a systemd service. Manage it with:
 
 ```bash
-sudo ./mikroproxy
-```
-
-Or specify a custom config path:
-
-```bash
-sudo ./mikroproxy --config=/path/to/config.conf
+sudo systemctl status mikroproxy
+sudo systemctl restart mikroproxy
+sudo systemctl stop mikroproxy
 ```
 
 ## Testing
 
-1. **HTTP Mode**  
-   ```bash
-   curl -x http://127.0.0.1:3128 http://example.com -v
-   ```  
-   Expects to see the request forwarded to `example.com`.
+### HTTP Mode
 
-2. **SOCKS5 Mode**  
-   ```bash
-   curl --socks5 127.0.0.1:3128 http://example.com -v
-   ```  
-   Uses a SOCKS tunnel to request `example.com`.
+```bash
+curl -x http://127.0.0.1:3128 http://example.com
+```
 
-Check logs at the path configured in `log_file` (defaults to `/var/log/mikroproxy.log`) for connection info.
+### SOCKS5 Mode
+
+```bash
+curl --socks5 127.0.0.1:3128 http://example.com
+```
+
+Check `/var/log/mikroproxy.log` (or your configured file) for connection logs.
 
 ## License
 
-MikroProxy is released under the [MIT License](https://opensource.org/licenses/MIT). See [LICENSE](LICENSE) for details.
+MikroProxy is licensed under the [MIT License](https://opensource.org/licenses/MIT).
